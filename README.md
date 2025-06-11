@@ -91,10 +91,10 @@ RAG Pipeline
 
 
 ---------------------------------
-Start:
+# Start:
 python main.py
 
-API starten:
+# API starten:
 uvicorn app.api.api_maker:app --reload
 
 
