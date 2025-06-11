@@ -1,0 +1,249 @@
+# === Datei: app\api\api_maker.py ===
+
+from fastapi import FastAPI, File, UploadFile, Form
+from fastapi.responses import JSONResponse
+import os
+from app.pdf_processing.pdf_loader import load_pdfs_from_folder
+from app.pdf_processing.text_splitter import split_text
+from app.embedding.embedding import embed_texts
+from app.vector_store.vector_store import FaissStore
+from app.QA.retrievalQA import answer_question
+import logging
+from typing import Optional
+
+# === ENV KONFIGURATION ===
+VECTOR_STORE_PATH = "faiss_index"
+PDF_FOLDER = "data"
+INDEX_PATH = os.path.join(VECTOR_STORE_PATH, "index.faiss")
+META_PATH = os.path.join(VECTOR_STORE_PATH, "metadata.pkl")
+
+# === Logging ===
+logging.basicConfig(
+    filename="system.log",
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+
+# === App Initialisieren ===
+app = FastAPI(title="Wissenssystem API")
+
+# === Laden oder initialisieren der Vektordatenbank ===
+vector_store = FaissStore(dim=384, db_path=INDEX_PATH, metadata_path=META_PATH)
+if os.path.exists(INDEX_PATH):
+    vector_store.load()
+
+# === Endpunkte ===
+
+@app.post("/upload")
+async def upload_document(file: UploadFile = File(...)):
+    try:
+        file_location = os.path.join(PDF_FOLDER, file.filename)
+        with open(file_location, "wb") as f:
+            f.write(await file.read())
+        logging.info(f"Hochgeladen: {file.filename}")
+        
+        # Neu verarbeiten
+        documents = load_pdfs_from_folder(PDF_FOLDER)
+        all_chunks = []
+        for doc in documents:
+            chunks = split_text(doc["text"])
+            all_chunks.extend(chunks)
+        embeddings = embed_texts(all_chunks)
+        vector_store.add_embeddings(embeddings, all_chunks)
+        vector_store.save()
+
+        return {"status": "ok", "filename": file.filename}
+    except Exception as e:
+        logging.error(f"Fehler beim Upload: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.post("/question")
+async def ask_question(question: str = Form(...)):
+    try:
+        logging.info(f"Frage gestellt: {question}")
+        response = answer_question(question, vector_store)
+        return {"question": question, "answer": response}
+    except Exception as e:
+        logging.error(f"Fehler bei Frage: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.post("/feedback")
+async def feedback(
+    question: str = Form(...),
+    answer: str = Form(...),
+    rating: int = Form(...),
+    comment: Optional[str] = Form(None)
+):
+    try:
+        feedback_entry = f"Frage: {question}\nAntwort: {answer}\nBewertung: {rating}/5\nKommentar: {comment or '-'}\n---\n"
+        with open("feedback.log", "a", encoding="utf-8") as f:
+            f.write(feedback_entry)
+        logging.info("Feedback erhalten")
+        return {"status": "Danke für dein Feedback!"}
+    except Exception as e:
+        logging.error(f"Feedback-Fehler: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# === Datei: app\embedding\embedding.py ===
+
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer("intfloat/multilingual-e5-small")
+
+def embed_texts(texts):
+    inputs = [f"passage: {text}" for text in texts]
+    embeddings = model.encode(inputs, show_progress_bar=True)
+    return embeddings
+
+# === Datei: app\llm\llm_loader.py ===
+
+# Lädt ein lokal laufendes Mistral 7B-Modell via llama-cpp
+
+from llama_cpp import Llama
+
+# Initialisiere das Modell (GGUF-Datei muss vorhanden sein)
+llm = Llama(
+    model_path="models/mistral-7b-instruct-v0.1.Q4_K_M.gguf",  # Pfad zur Modell-Datei
+    n_ctx=4096,
+    n_threads=8,   # CPU anpassen?
+    n_gpu_layers=0 # 0 =rein CPU-basiert
+)
+
+def generate_answer(prompt):
+    """
+    Übergibt den Prompt an das Modell und gibt die Antwort zurück.
+    """
+    response = llm(prompt, max_tokens=512, stop=["</s>"])
+    return response["choices"][0]["text"].strip()
+
+
+# === Datei: app\pdf_processing\pdf_loader.py ===
+
+import os
+from PyPDF2 import PdfReader
+
+def load_pdfs_from_folder(folder_path):
+    texts = []
+    for filename in os.listdir(folder_path):
+        path = os.path.join(folder_path, filename)
+        text = ""
+
+        if filename.endswith(".pdf"):
+            from PyPDF2 import PdfReader
+            reader = PdfReader(path)
+            for page in reader.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text
+
+        #V1
+        elif filename.endswith(".txt"):
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+
+        if text.strip():
+            texts.append({"filename": filename, "text": text})
+    return texts
+
+
+# === Datei: app\pdf_processing\text_splitter.py ===
+
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+def split_text(text, chunk_size=500, chunk_overlap=50):
+    splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+    return splitter.split_text(text)
+
+
+# === Datei: app\QA\retrievalQA.py ===
+
+# Kombination aus Retrieval (semantisch ähnlichster Kontext) + Antwortgenerierung via LLM
+
+from app.embedding.embedding import embed_texts
+#from app.vector_store.vector_store import FaissStore
+from app.llm.llm_loader import generate_answer  # Lokales Modell
+import numpy as np
+
+def answer_question(question, vector_store):
+    """
+    1. Embedding der Frage
+    2. Ähnlichste Textabschnitte abrufen
+    3. Prompt bauen
+    4. Antwort generieren via Mistral (lokal)
+    """
+    print("Frage:", question)
+    query_embedding = embed_texts([question])
+    query_embedding = np.array(query_embedding).astype("float32").reshape(1, -1)
+    print("Query-Embedding-Shape:", query_embedding.shape)
+
+
+    relevant_chunks = vector_store.search(query_embedding, top_k=3)
+
+    # Prompt für das lokale Modell
+    context = "\n\n".join(relevant_chunks)
+    prompt = f"""Beantworte die folgende Frage auf Basis des untenstehenden Kontexts in eigenen Worten, klar und verständlich, so als würdest du es jemandem erklären, der kein Experte ist. Verwende kein Copy-Paste aus dem Text, sondern fasse den Inhalt logisch zusammen:
+
+Kontext:
+{context}
+
+Frage: {question}
+Antwort:"""
+
+    print("Prompt an LLM:\n", prompt)
+
+    answer = generate_answer(prompt)
+    return answer
+
+
+# === Datei: app\vector_store\vector_store.py ===
+
+# Speichert und sucht Vektoren mit FAISS
+
+import faiss
+import os
+import pickle
+
+class FaissStore:
+    def __init__(self, dim, db_path="faiss_index/index.faiss", metadata_path="faiss_index/metadata.pkl"):
+        self.index = faiss.IndexFlatL2(dim)         # L2-Distanzbasierter Index
+        self.db_path = db_path
+        self.metadata_path = metadata_path
+        self.text_chunks = []
+
+    def add_embeddings(self, embeddings, chunks):
+        """
+        Speichert neue Embeddings + zugehörige Texte.
+        """
+        self.index.add(embeddings)
+        self.text_chunks.extend(chunks)
+
+    def save(self):
+        """
+        Speichert Index + Metadaten auf die Festplatte.
+        """
+        faiss.write_index(self.index, self.db_path)
+        with open(self.metadata_path, "wb") as f:
+            pickle.dump(self.text_chunks, f)
+        print(f"Gespeicherte Text-Chunks: {len(self.text_chunks)}")
+
+    def load(self):
+        """
+        Lädt gespeicherten Index + Metadaten.
+        """
+        if os.path.exists(self.db_path):
+            self.index = faiss.read_index(self.db_path)
+        if os.path.exists(self.metadata_path):
+            with open(self.metadata_path, "rb") as f:
+                self.text_chunks = pickle.load(f)
+        print(f"Geladene Text-Chunks: {len(self.text_chunks)}")
+
+    def search(self, query_embedding, top_k=3):
+        D, I = self.index.search(query_embedding, top_k)
+        print("Such-Indizes:", I)  
+        results = [self.text_chunks[i] for i in I[0] if i < len(self.text_chunks)]
+        print(f"Anzahl gefundener Chunks: {len(results)}")
+        return results
+
+
+

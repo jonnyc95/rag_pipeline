@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pkl
+*.log
+
+# Virtuelle Umgebung
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# FAISS & Modelle
+faiss_index/
+models/
+
+# Env-Datei 
+#.env

@@ -1,0 +1,28 @@
+# Bytecode & Cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs & Pickle
+*.log
+*.pkl
+
+# Virtuelle Umgebungen
+.venv/
+venv/
+
+# IDEs & Editor-Dateien
+*.swp
+*.swo
+*.bak
+*.tmp
+.DS_Store
+.vscode/
+.idea/
+
+# Umgebungsvariablen (wird per --env-file bereitgestellt)
+.env
+
+# OPTIONAL: Ausschluss großer Datensätze/Uploads
+# /data/
+# /faiss_index/
