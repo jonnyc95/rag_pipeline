@@ -99,7 +99,8 @@ pip install -r requirements.txt
 Achtung: Für llama-cpp muss dein System C++ unterstützen (C++ Buildtools für LLM Mode)
 
 # Ausführen:
-python main.py oder direkt via FastAPI starten im nächsten Schritt (siehe "API starten")
+python main.py 
+oder direkt via FastAPI starten im nächsten Schritt (siehe "API starten")
 
 # API starten:
 uvicorn app.api.api_maker:app --reload
