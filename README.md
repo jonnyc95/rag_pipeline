@@ -165,12 +165,4 @@ Architektur:
 
 Bei Fragen gerne melden!
 
-UI ist noch in Bearbeitung!
-
-Für Git Repo:
-git init
-git remote add origin https://github.com/jonnyc95/rag_pipeline.git
-git add .
-git commit -m "Initial commit"
-git push -u origin master
-
+UI ist noch in Bearbeitung! (Bonus)
